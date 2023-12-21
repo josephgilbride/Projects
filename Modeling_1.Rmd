@@ -1,0 +1,155 @@
+
+title: "R Markdown - Frameworks 2 project"
+output: html_document
+---
+
+This portion of the project focuses on cleaning data, and looking into if there's a correlation between the document's text and amount awarded to each program.
+
+#Define dataset
+
+```{r}
+gov_data= AssistanceListings_DataGov_PUBLIC_CURRENT_20190706_AssistanceListings_DataGov_PUBLIC_CURRENT_20190706
+```
+
+#Clean Data
+
+```{r}
+library(textclean)
+library(tidytext)
+library(dplyr)
+library(tm)
+library(splitstackshape)
+```
+
+#Split data
+
+```{r}
+tokens = c("list","act","description","awarded","lump","other","isApplicable", "est", stopwords)
+
+goodrows = cbind(gov_data[,0:2], gov_data[,37])
+rawrows = gov_data[,3:38] 
+rawrows$`Obligations (122)` = NULL
+rawrows$URL = NULL
+Award = gov_data[,25]
+```
+
+
+#Clean award amount column
+```{r}
+library(splitstackshape)
+
+Award = apply(Award,2,function(x)replace_tokens(x, tokens))
+Award = as.data.frame(Award)
+Award = cSplit(Award, "Obligations (122)", sep="FY ", type.convert=FALSE)
+Award = Award[,3]
+Award = apply(Award,2,function(x)substring(x, 3))
+Award = apply(Award,2,function(x)strip(x,char.keep = '.',digit.remove = FALSE, apostrophe.remove = FALSE, lower.case = FALSE))
+Award = gsub(' ',"",Award)
+Award = gsub('.00 ',"",Award)
+Award = gsub("[^0-9.-]", "", Award)
+Award = apply(Award,2,function(x)as.numeric(x))
+Award[is.na(Award)] <- 0
+Award = Award[,1]
+Award = as.data.frame(Award)
+```
+
+
+#Prepare text columns for corpus
+```{r}
+corpusdat = do.call(paste, as.data.frame(rawrows, stringsAsFactors=FALSE))
+corpusdat = as.data.frame(corpusdat)
+gov_data = cbind(goodrows, corpusdat, Award)
+```
+
+
+#Building Corpus
+```{r}
+
+corpus = Corpus(VectorSource(gov_data$corpusdat))
+corpus = tm_map(corpus,FUN = content_transformer(tolower))
+corpus = tm_map(corpus,
+                FUN = content_transformer(FUN = function(x)gsub(pattern = 'http[[:alnum:][:punct:]]*',
+                                                                replacement = ' ',x = x)))
+corpus = tm_map(corpus,FUN = removePunctuation)
+corpus = tm_map(corpus,FUN = removeWords,c(stopwords('english')))
+corpus = tm_map(corpus,FUN = stripWhitespace)
+dtm = DocumentTermMatrix(corpus)
+dict = findFreqTerms(DocumentTermMatrix(corpus),
+                     lowfreq = 0)
+dict_corpus = Corpus(VectorSource(dict))
+xdtm = removeSparseTerms(dtm,sparse = 0.95)
+
+dtm_tfidf = DocumentTermMatrix(x=corpus,
+                               control = list(weighting=function(x) weightTfIdf(x,normalize=F)))
+xdtm_tfidf = removeSparseTerms(dtm_tfidf,sparse = 0.95)
+xdtm_tfidf = as.data.frame(as.matrix(xdtm_tfidf))
+sort(colSums(xdtm_tfidf),decreasing = T)
+
+
+xdtm_tfidf = cbind(xdtm_tfidf, Award)
+names(xdtm_tfidf) <- make.names(names(xdtm_tfidf))
+xdtm_tfidf$X. = NULL
+
+```
+
+#Other tables for analysis
+```{r}
+
+library(syuzhet)
+
+syuzhet = as.matrix(apply(rawrows,2,function(x)get_sentiment(x, method = "syuzhet")))
+syuzhet = cbind(syuzhet, Award=Award$Award)
+syuzhet = as.data.frame(syuzhet)
+
+afinn = as.matrix(apply(rawrows,2,function(x)get_sentiment(x, method = "afinn")))
+afinn = cbind(afinn, Award =Award$Award)
+afinn = as.data.frame(afinn)
+
+nrc = as.matrix(apply(rawrows,2,function(x)get_sentiment(x, method = "nrc")))
+nrc = cbind(nrc, Award= Award$Award)
+nrc = as.data.frame(nrc)
+
+bing = as.matrix(apply(rawrows,2,function(x)get_sentiment(x, method = "bing")))
+bing = cbind(bing, Award= Award$Award)
+bing = as.data.frame(bing)
+
+lengths = as.matrix(apply(rawrows,2,function(x)nchar(x)))
+lengths = cbind(lengths, Award=Award$Award)
+lengths = as.data.frame(lengths)
+lengths[is.na(lengths)] = 0
+```
+
+#Methods of eval
+```{r}
+
+syuzhet
+afinn
+nrc
+bing
+lengths
+xdtm_tfidf
+
+
+#View correlations in document - e.g...
+cor(syuzhet, syuzhet$Award)
+corrplot(cor(syuzhet))
+```
+
+# Predictive Model
+```{r}
+library(randomForest)
+library(caret)
+
+                         
+set.seed(522)
+split = createDataPartition(y=xdtm_tfidf$Award,p = 0.7,list = F,groups = 100)
+train = xdtm_tfidf[split,]
+test = xdtm_tfidf[-split,]
+
+rfdt = randomForest(Award~., train)
+
+predForest = predict(rfdt,newdata=test)
+rmse = sqrt(mean((predForest - test$Award)^2)) 
+plot(rfdt)
+```
+```
